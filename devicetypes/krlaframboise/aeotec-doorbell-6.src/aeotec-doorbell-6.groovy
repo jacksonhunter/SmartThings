@@ -1,5 +1,5 @@
 /**
- *  Aeotec Doorbell 6 v1.1.3
+ *  Aeotec Doorbell 6 v1.3.1
  *  (Model: ZW162-A)
  *
  *  Author: 
@@ -9,6 +9,18 @@
  *    
  *
  *  Changelog:
+ *
+ *    1.3.1 (09/13/2020)
+ *      - Removed vid which makes it fully supported in the new mobile app.
+ *      - Made setLevel temporarily change the level to prevent network errors.
+ *
+ *    1.2 (05/09/2020)
+ *      - *** POSSIBLE BREAKING CHANGES - TEST AFTER UPDATING ***
+ *      - Switched to notification reports and sound switch events with endpoints to eliminate the need to use association groups because SmartThings stopped supporting them.
+ *      - Implemented Chime capability.
+ *
+ *    1.1.4 (03/14/2020)
+ *      - Fixed bug with enum settings that was caused by a change ST made in the new mobile app.
  *
  *    1.1.3 (09/14/2019)
  *      - Added fingerprints for EU and AU models.
@@ -53,8 +65,7 @@ metadata {
 		name: "Aeotec Doorbell 6", 
 		namespace: "krlaframboise", 
 		author: "Kevin LaFramboise",
-		ocfDeviceType: "x.com.st.d.siren",
-		vid:"generic-siren"
+		ocfDeviceType: "x.com.st.d.siren"
 	) {
 		capability "Actuator"
 		capability "Alarm"
@@ -65,9 +76,10 @@ metadata {
 		capability "Switch Level"		
 		capability "Tamper Alert"
 		capability "Tone"
+		capability "Chime"
 		// capability "Configuration"
 		capability "Refresh"
-		capability "Health Check"
+		capability "Health Check"		
 				
 		attribute "lastCheckIn", "string"
 		attribute "primaryStatus", "string"
@@ -384,6 +396,10 @@ private initialize() {
 		sendEvent(getEventMap("level", 0))
 	}	
 	
+	if (!device?.currentValue("chime")) {
+		sendEvent(getEventMap("chime", "off"))
+	}
+	
 	if (!device?.currentValue("checkInterval")) {
 		def checkInterval = (6 * 60 * 60) + (5 * 60)
 
@@ -427,29 +443,16 @@ def healthPoll() {
 }
 
 private canRequestButtonBattery(btn) {
-	// Only request battery level of buttons that are paired and haven't reported it within the last 11 hours.
-	return (buttonIsPaired(btn) && !isDuplicateCommand(state["btn${btn.num}LastBattery"], (11 * 60 * 60 * 1000)))
+	// Only request battery level of buttons that are paired and haven't reported it within the last 24 hours.
+	return (buttonIsPaired(btn) && !isDuplicateCommand(state["btn${btn.num}LastBattery"], (23 * 60 * 60 * 1000)))
 }
 
 private getConfigureCmds() {
 	def cmds = []
 	
-	if (state.syncAll || !state.playAssoc) {
-		cmds << associationSetCmd(PLAY_ASSOC.groupId)
-		cmds << associationGetCmd(PLAY_ASSOC.groupId)
-	}
-	
 	if (state.syncAll || tamperVolumeSetting != state.tamperVolume) {
 		cmds << soundSwitchConfigSetCmd(tamperVolumeSetting, TONE.tamper, TAMPER_ASSOC.endpoint)
 		cmds << soundSwitchConfigGetCmd(TAMPER_ASSOC.endpoint)		
-	}
-	
-	buttons.each { btn ->
-		if (state.syncAll || !state["btn${btn.num}Assoc"]) {
-			cmds << associationSetCmd(btn.assocGroupId)
-			cmds << multiChannelAssociationSetCmd(btn.assocGroupId, btn.endpoint)
-			cmds << multiChannelAssociationGetCmd(btn.assocGroupId)
-		}
 	}
 	
 	if (state.syncAll) {
@@ -559,7 +562,13 @@ def playText(message, volume=null) {
 
 
 def setLevel(level, duration=null) {
+	sendEvent(name:"level", value:level)
+	runIn(2, resetLevel)
 	playSound(level)
+}
+
+def resetLevel() {
+	sendEvent(name:"level", value:0)
 }
 
 
@@ -586,7 +595,7 @@ def playSound(soundNumber, volume=null) {
 			log.warn "Ignoring playSound(${soundNumber}) because soundNumber must be between 1 and 30."
 		}	
 	}
-	return cmds ? delayBetween(cmds, 200) : []
+	return cmds ? delayBetween(cmds, 300) : []
 }
 
 private canPlaySound(cmd) {
@@ -613,6 +622,10 @@ private validateVolume(volume) {
 	return vol
 }
 
+
+def chime() {
+	return playSound(chimeToneSetting)
+}
 
 def beep() {
 	return playSound(chimeToneSetting)
@@ -687,7 +700,7 @@ private getSirenStrobeCmds(volume, lightEffect, tone=sirenToneSetting, continuou
 		configSetCmd(siren1GroupParam, configVal),
 		soundSwitchConfigSetCmd(volume, tone, PLAY_ASSOC.endpoint),
 		soundSwitchTonePlaySetCmd(tone, PLAY_ASSOC.endpoint)
-	], 200)
+	], 250)
 }
 
 
@@ -729,9 +742,6 @@ private getRefreshBtnsCmds() {
 	def cmds = []
 	buttons.each { btn ->
 		cmds << configGetCmd(getButtonInfoParam(btn))
-		// if (buttonIsPaired(btn)) {
-			// cmds << basicGetCmd(btn.endpoint)
-		// }
 	}	
 	return cmds
 }
@@ -895,23 +905,6 @@ private sendCmds(cmds) {
 
 private versionGetCmd() {
 	return secureCmd(zwave.versionV1.versionGet())
-}
-
-private associationSetCmd(group) {
-	return secureCmd(zwave.associationV2.associationSet(groupingIdentifier:group, nodeId:[zwaveHubNodeId]))
-}
-
-private associationGetCmd(group) {
-	return secureCmd(zwave.associationV2.associationGet(groupingIdentifier:group))
-}
-
-private multiChannelAssociationSetCmd(group, endpoint) { 
-	def cmd = zwave.multiChannelAssociationV2.multiChannelAssociationSet(groupingIdentifier:group, nodeId:[zwaveHubNodeId]).format()
-	return secureRawCmd("${cmd}00${convertToHex(zwaveHubNodeId)}${convertToHex(endpoint)}")
-}	
-
-private multiChannelAssociationGetCmd(group) { 
-	return secureCmd(zwave.multiChannelAssociationV2.multiChannelAssociationGet(groupingIdentifier:group))
 }
 
 private basicGetCmd(endpoint=null) {
@@ -1091,7 +1084,7 @@ def zwaveEvent(physicalgraph.zwave.commands.multichannelv3.MultiChannelCmdEncap 
 		return zwaveEvent(encapsulatedCommand, cmd.sourceEndPoint)
 	}
 	else if (cmd.commandClass == 121) {
-		return soundSwitchEvent(cmd)
+		return soundSwitchEvent(cmd, cmd.sourceEndPoint)
 	}
 	else {
 		logDebug "Unable to get encapsulated command: $cmd"
@@ -1100,19 +1093,34 @@ def zwaveEvent(physicalgraph.zwave.commands.multichannelv3.MultiChannelCmdEncap 
 }
 
 
-def zwaveEvent(physicalgraph.zwave.commands.notificationv3.NotificationReport cmd) {
-	logTrace "NotificationReport: $cmd"
+def zwaveEvent(physicalgraph.zwave.commands.notificationv3.NotificationReport cmd, endpoint=null) {
+	logTrace "NotificationReport: $cmd - endpoint: ${endpoint}"
+	
+	def btn 
+	if (endpoint) {
+		btn = buttons.find { it.endpoint == endpoint }
+	}
 	
 	switch(cmd.notificationType) {
 		case 7:
 			handleTamperEvent(cmd.event == 9 ? "detected" : "clear")
 			break
 		case 8:
-			// Request info of all batteries to determine which one is low/normal.
-			sendCmds(delayBetween(getRefreshBtnsCmds(), 200))
+			// low/normal battery change.
+			if (btn) {
+				sendCmds([configGetCmd(getButtonInfoParam(btn))])
+			}
+			else {
+				sendCmds(delayBetween(getRefreshBtnsCmds(), 200))
+			}
 			break
-		case 0x0E:
-			// Ignore siren notifications
+		case 14:
+			if (btn) {
+				handleButtonEvent(btn, cmd.event)
+			}
+			// else if (endpoint == 6) {
+				// handleAlarmChimeEvent(cmd.event)	
+			// }
 			break
 		default:
 			logDebug "Unknown Notification Type: ${cmd}"		
@@ -1131,34 +1139,6 @@ private handleTamperEvent(value) {
 def resetTamper() {
 	sendEventIfNew("tamper", "clear", true)
 	sendEventIfNew("secondaryStatus", "")	
-}
-
-
-def zwaveEvent(physicalgraph.zwave.commands.associationv2.AssociationReport cmd) {
-	logDebug "AssociationReport: ${cmd}"
-
-	if (cmd.groupingIdentifier == PLAY_ASSOC.groupId && zwaveHubNodeId in cmd.nodeId) {
-		updateSyncStatus("Syncing...")
-		runIn(5, updateSyncStatus)
-		
-		state.playAssoc = true
-	}
-	return []
-}
-
-
-def zwaveEvent(physicalgraph.zwave.commands.multichannelassociationv2.MultiChannelAssociationReport cmd) {
-	logDebug "MultiChannelAssociationReport: ${cmd}"
-
-	updateSyncStatus("Syncing...")
-	runIn(5, updateSyncStatus)
-	
-	buttons.each { btn ->
-		if (cmd.groupingIdentifier == btn.assocGroupId && cmd.nodeId == [1, 0, zwaveHubNodeId, btn.endpoint]) {
-			state["btn${btn.num}Assoc"] = true
-		}
-	}
-	return []
 }
 
 
@@ -1333,14 +1313,8 @@ private getSyncStatus() {
 private getPendingChanges() {
 	def pendingConfigParams = configParams.count { isConfigParamSynced(it) ? 0 : 1 }
 	def pendingTamper = (tamperVolumeSetting != state.tamperVolume) ? 1 : 0
-	def pendingPlayAssoc = !state.playAssoc ? 1 : 0
-	def pendingBtnAssoc = 0
-	buttons.each { btn ->
-		if (!state["btn${btn.num}Assoc"]) {
-			pendingBtnAssoc += 1
-		}
-	}
-	return (pendingConfigParams + pendingTamper + pendingPlayAssoc + pendingBtnAssoc)
+	
+	return (pendingConfigParams + pendingTamper)
 }
 
 private isConfigParamSynced(param) {
@@ -1358,35 +1332,40 @@ private setParamStoredValue(paramNum, value) {
 
 def zwaveEvent(physicalgraph.zwave.commands.basicv1.BasicReport cmd, endpoint=null) {
 	logTrace "BasicReport: ${cmd}" + (endpoint ? " (endpoint:${endpoint})" : "")
-	handleBasicEvent(cmd.value)
+	handleBasicEvent(cmd.value, endpoint)
 	return []
 }
 
 def zwaveEvent(physicalgraph.zwave.commands.basicv1.BasicSet cmd, endpoint=null) {
-	logTrace "BasicSet: ${cmd}" + (endpoint ? " (endpoint:${endpoint})" : "")
-	
+	logTrace "BasicSet: ${cmd}" + (endpoint ? " (endpoint:${endpoint})" : "")	
+	handleBasicEvent(cmd.value, endpoint)	
+	return []
+}
+
+private handleBasicEvent(rawVal, endpoint) {
 	def btn 
 	if (endpoint) {
 		btn = buttons.find { it.endpoint == endpoint }
 	}
 	
 	if (btn) {
-		handleButtonEvent(btn, cmd.value)
+		handleButtonEvent(btn, rawVal)
 	}
 	else {
-		handleBasicEvent(cmd.value)
+		handleAlarmChimeEvent(rawVal)
 		
-		if (!cmd.value) {
+		if (!rawVal) {
 			// The basic set off commands for the endpoints sometimes get lost so this ensures that the buttons will always get set back to off.
 			buttons.each {
-				handleButtonEvent(it, cmd.value)
+				if (findChild(it)?.currentValue("switch") == "on") {
+					handleButtonEvent(it, rawVal)
+				}
 			}
 		}
 	}
-	return []
 }
 
-private handleBasicEvent(rawVal) {
+private handleAlarmChimeEvent(rawVal) {
 	def lastAction = state.lastAction
 	def statusVal = "off"
 	def switchVal = "off"
@@ -1420,7 +1399,11 @@ private handleBasicEvent(rawVal) {
 	
 	sendEventIfNew("alarm", alarmVal, true)
 	sendEventIfNew("switch", switchVal, true)
-	sendEventIfNew("primaryStatus", statusVal, (lastAction == "chime"))	
+	sendEventIfNew("primaryStatus", statusVal)
+	
+	if (lastAction == "chime" || (statusVal == "off")) {
+		sendEventIfNew("chime", statusVal, true)
+	}
 }
 
 private handleButtonEvent(btn, rawVal) {
@@ -1444,9 +1427,14 @@ private handleButtonEvent(btn, rawVal) {
 }
 
 
-def soundSwitchEvent(physicalgraph.zwave.commands.multichannelv3.MultiChannelCmdEncap cmd) {
-	logTrace "soundSwitchEvent: ${cmd}"
+def soundSwitchEvent(physicalgraph.zwave.commands.multichannelv3.MultiChannelCmdEncap cmd, endpoint=null) {
+	logTrace "soundSwitchEvent: ${cmd} - endpoint: ${endpoint}"
 
+	def btn 
+	if (endpoint) {
+		btn = buttons.find { it.endpoint == endpoint }
+	}
+			
 	switch (cmd.command) {
 		case 7:
 			updateSyncStatus("Syncing...")
@@ -1455,6 +1443,14 @@ def soundSwitchEvent(physicalgraph.zwave.commands.multichannelv3.MultiChannelCmd
 			break		
 		case 10:			
 			// Sound Switch Tone Play Report
+			def rawVal = (cmd.parameter ? cmd.parameter[0] : 0)			
+			if (btn && !rawVal && (findChild(btn)?.currentValue("switch") == "on")) {
+				// The notification report for off is often lost for short sounds so this should ensure that the button's switch state goes back to off.
+				handleButtonEvent(btn, rawVal)
+			}
+			else if (endpoint == 6) {
+				handleAlarmChimeEvent(rawVal)
+			}
 			break			
 		default:
 			logDebug "Unknown Sound Switch Command: ${cmd}"
@@ -1671,7 +1667,7 @@ private getParam(num, name, size, defaultVal=null, options=null) {
 }
 
 private setDefaultOption(options, defaultVal) {
-	return options?.collect { k, v ->
+	return options?.collectEntries { k, v ->
 		if ("${k}" == "${defaultVal}") {
 			v = "${v} [DEFAULT]"		
 		}
